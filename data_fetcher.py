@@ -168,6 +168,85 @@ def get_current_prices(symbols, api_key="", secret_key=""):
         return {}
 
 
+def fetch_intraday_bars(
+    symbols: List[str],
+    api_key: str = "",
+    secret_key: str = "",
+    timeframe_min: int = 5,
+    days_back: int = 2,
+) -> Dict[str, pd.DataFrame]:
+    """
+    Fetch intraday bars (default 5-min) for day trading strategies.
+    Primary: Alpaca IEX feed | Fallback: yfinance 5-min bars
+    """
+    if api_key and secret_key:
+        try:
+            from alpaca.data.historical import StockHistoricalDataClient
+            from alpaca.data.requests import StockBarsRequest
+            from alpaca.data.timeframe import TimeFrame, TimeFrameUnit
+
+            client = StockHistoricalDataClient(api_key, secret_key)
+            end    = datetime.now()
+            start  = end - timedelta(days=days_back)
+
+            result = {}
+            for i in range(0, len(symbols), 25):
+                batch = symbols[i:i+25]
+                try:
+                    req  = StockBarsRequest(
+                        symbol_or_symbols=batch,
+                        timeframe=TimeFrame(timeframe_min, TimeFrameUnit.Minute),
+                        start=start,
+                        end=end,
+                        feed="iex",
+                    )
+                    bars   = client.get_stock_bars(req)
+                    df_all = bars.df
+                    if df_all.empty:
+                        continue
+                    for sym in batch:
+                        try:
+                            sym_df = df_all.loc[sym].copy()
+                            sym_df.index = pd.DatetimeIndex(sym_df.index)
+                            sym_df = _normalise_cols(sym_df)
+                            if len(sym_df) >= 5:
+                                result[sym] = sym_df
+                        except KeyError:
+                            pass
+                except Exception as e:
+                    st.warning(f"Alpaca intraday error: {e}")
+                time.sleep(0.1)
+
+            if result:
+                return result
+        except Exception as e:
+            st.warning(f"Alpaca intraday unavailable: {e}")
+
+    # yfinance fallback — 5-min bars, last 5 days
+    import yfinance as yf
+    result = {}
+    interval = f"{timeframe_min}m" if timeframe_min in (1, 2, 5, 15, 30, 60, 90) else "5m"
+    for i in range(0, len(symbols), 25):
+        batch = symbols[i:i+25]
+        try:
+            raw = yf.download(batch, period="5d", interval=interval,
+                              auto_adjust=True, group_by="ticker",
+                              progress=False, threads=True)
+            for sym in batch:
+                try:
+                    df = raw.copy() if len(batch) == 1 else raw[sym].copy()
+                    df = _normalise_cols(df)
+                    df = df.dropna(subset=["close"])
+                    if len(df) >= 5:
+                        result[sym] = df
+                except Exception:
+                    pass
+        except Exception as e:
+            st.warning(f"yfinance intraday error: {e}")
+        time.sleep(0.05)
+    return result
+
+
 def market_is_open() -> Tuple[bool, str]:
     from datetime import timezone
     import zoneinfo
