@@ -423,10 +423,320 @@ def momentum_filter(df: pd.DataFrame) -> Dict:
 
 
 # ═══════════════════════════════════════════════════════════
+#  DAY TRADING STRATEGY 1: VWAP Trend
+# ═══════════════════════════════════════════════════════════
+
+def vwap_strategy(df: pd.DataFrame) -> Dict:
+    """
+    VWAP computed from rolling daily bars (monthly window).
+    Bullish: price > VWAP + rel vol high + RSI rising.
+    Bearish: price < VWAP + rel vol high + RSI falling.
+    """
+    if len(df) < 22:
+        return {"passed": False, "score": 0, "detail": {}, "pattern": "VWAP"}
+
+    df = df.copy()
+    # Typical price × volume cumulative over rolling 20 days
+    df["tp"]   = (df["high"] + df["low"] + df["close"]) / 3
+    df["tpv"]  = df["tp"] * df["volume"]
+    df["vwap"] = df["tpv"].rolling(20).sum() / df["volume"].rolling(20).sum()
+
+    latest   = df.iloc[-1]
+    close    = latest["close"]
+    vwap     = latest["vwap"]
+    rel_vol  = latest["rel_vol"]
+    rsi      = latest["rsi"]
+    rsi_prev = df["rsi"].iloc[-4]
+
+    above_vwap    = bool(close > vwap)
+    pct_from_vwap = (close - vwap) / vwap
+
+    if above_vwap:
+        checks = {
+            "Price Above VWAP":    True,
+            "VWAP Gap > 0.5%":     bool(pct_from_vwap > 0.005),
+            "Rel Vol >= 1.5x":     bool(rel_vol >= 1.5),
+            "RSI Rising":          bool(rsi > rsi_prev),
+            "RSI 45-80":           bool(45 <= rsi <= 80),
+            "MA20 Aligned":        bool(close > latest["ma20"]),
+        }
+        direction = "LONG"
+    else:
+        checks = {
+            "Price Below VWAP":    True,
+            "VWAP Gap > 0.5%":     bool(abs(pct_from_vwap) > 0.005),
+            "Rel Vol >= 1.5x":     bool(rel_vol >= 1.5),
+            "RSI Falling":         bool(rsi < rsi_prev),
+            "RSI 20-55":           bool(20 <= rsi <= 55),
+            "MA20 Aligned":        bool(close < latest["ma20"]),
+        }
+        direction = "SHORT"
+
+    score  = sum(checks.values())
+    passed = score >= 4
+    grade  = "A" if score >= 6 else "B" if score >= 4 else "C"
+
+    return {
+        "passed":    passed,
+        "score":     score,
+        "total":     6,
+        "detail":    checks,
+        "grade":     grade,
+        "pattern":   "VWAP",
+        "direction": direction,
+        "vwap":      round(vwap, 2),
+        "pct_from_vwap": round(pct_from_vwap * 100, 2),
+        "rsi":       round(rsi, 1),
+        "rel_vol":   round(rel_vol, 1),
+    }
+
+
+# ═══════════════════════════════════════════════════════════
+#  DAY TRADING STRATEGY 2: Opening Range Breakout (ORB)
+# ═══════════════════════════════════════════════════════════
+
+def opening_range_breakout(df: pd.DataFrame) -> Dict:
+    """
+    Approximates ORB using daily bar structure.
+    Bullish ORB: gap up + today closed in top 25% of range + high volume.
+    Bearish ORB: gap down + today closed in bottom 25% + high volume.
+    """
+    if len(df) < 5:
+        return {"passed": False, "score": 0, "detail": {}, "pattern": "ORB"}
+
+    latest    = df.iloc[-1]
+    day_range = latest["high"] - latest["low"]
+    close_pos = (latest["close"] - latest["low"]) / day_range if day_range > 0 else 0.5
+    gap_pct   = latest["gap_pct"]
+    rel_vol   = latest["rel_vol"]
+
+    bullish_orb = gap_pct > 0.005
+    bearish_orb = gap_pct < -0.005
+
+    if bullish_orb:
+        checks = {
+            "Gap Up Open":           bool(gap_pct > 0.005),
+            "Closed Top 25% Range":  bool(close_pos >= 0.75),
+            "Rel Vol >= 2x":         bool(rel_vol >= 2.0),
+            "Above Yesterday High":  bool(latest["close"] > df.iloc[-2]["high"]),
+            "RSI > 50":              bool(latest["rsi"] > 50),
+            "MACD Bullish":          bool(latest["macd"] > latest["macd_sig"]),
+        }
+        direction = "BULLISH ORB"
+    elif bearish_orb:
+        checks = {
+            "Gap Down Open":         bool(gap_pct < -0.005),
+            "Closed Bot 25% Range":  bool(close_pos <= 0.25),
+            "Rel Vol >= 2x":         bool(rel_vol >= 2.0),
+            "Below Yesterday Low":   bool(latest["close"] < df.iloc[-2]["low"]),
+            "RSI < 50":              bool(latest["rsi"] < 50),
+            "MACD Bearish":          bool(latest["macd"] < latest["macd_sig"]),
+        }
+        direction = "BEARISH ORB"
+    else:
+        return {"passed": False, "score": 0, "detail": {"No significant gap": False},
+                "pattern": "ORB", "grade": "D", "direction": "NONE"}
+
+    score  = sum(checks.values())
+    passed = score >= 4
+    grade  = "A" if score >= 6 else "B" if score >= 4 else "C"
+
+    return {
+        "passed":    passed,
+        "score":     score,
+        "total":     6,
+        "detail":    checks,
+        "grade":     grade,
+        "pattern":   "ORB",
+        "direction": direction,
+        "gap_pct":   round(gap_pct * 100, 2),
+        "close_pos": round(close_pos * 100, 1),
+        "rel_vol":   round(rel_vol, 1),
+        "rsi":       round(latest["rsi"], 1),
+    }
+
+
+# ═══════════════════════════════════════════════════════════
+#  DAY TRADING STRATEGY 3: High Relative Volume Spike
+# ═══════════════════════════════════════════════════════════
+
+def high_relative_volume(df: pd.DataFrame, threshold: float = 3.0) -> Dict:
+    """
+    Detects stocks with unusually high volume today (3x+ average).
+    Combined with price momentum = high-probability day trade.
+    """
+    if len(df) < 22:
+        return {"passed": False, "score": 0, "detail": {}, "pattern": "High Rel Vol"}
+
+    latest  = df.iloc[-1]
+    rel_vol = latest["rel_vol"]
+    pct_chg = latest["pct_chg"]
+    close   = latest["close"]
+
+    # Price range expansion: today's range vs avg range
+    today_range = latest["high"] - latest["low"]
+    avg_range   = (df["high"] - df["low"]).rolling(20).mean().iloc[-1]
+    range_exp   = today_range / avg_range if avg_range > 0 else 1
+
+    checks = {
+        f"Rel Vol >= {threshold}x":  bool(rel_vol >= threshold),
+        "Range Expansion >= 1.5x":   bool(range_exp >= 1.5),
+        "Price Moving (>1%)":        bool(abs(pct_chg) >= 0.01),
+        "Above MA20":                bool(close > latest["ma20"]),
+        "RSI Active (40-85)":        bool(40 <= latest["rsi"] <= 85),
+        "MACD Confirming":           bool(
+            (pct_chg > 0 and latest["macd"] > latest["macd_sig"]) or
+            (pct_chg < 0 and latest["macd"] < latest["macd_sig"])
+        ),
+    }
+
+    score     = sum(checks.values())
+    passed    = bool(rel_vol >= threshold and abs(pct_chg) >= 0.01)
+    grade     = "A" if score >= 6 else "B" if score >= 4 else "C"
+    direction = "UP" if pct_chg > 0 else "DOWN"
+
+    return {
+        "passed":     passed,
+        "score":      score,
+        "total":      6,
+        "detail":     checks,
+        "grade":      grade,
+        "pattern":    "High Rel Vol",
+        "direction":  direction,
+        "rel_vol":    round(rel_vol, 1),
+        "range_exp":  round(range_exp, 1),
+        "pct_chg":    round(pct_chg * 100, 2),
+        "rsi":        round(latest["rsi"], 1),
+    }
+
+
+# ═══════════════════════════════════════════════════════════
+#  DAY TRADING STRATEGY 4: Pre-Market Gap & Go
+# ═══════════════════════════════════════════════════════════
+
+def premarket_gap_go(df: pd.DataFrame) -> Dict:
+    """
+    Identifies Gap & Go setups: stock gaps and CONTINUES in gap direction
+    (as opposed to fading back). Best day-trading momentum play.
+    """
+    if len(df) < 10:
+        return {"passed": False, "score": 0, "detail": {}, "pattern": "Gap & Go"}
+
+    latest  = df.iloc[-1]
+    prev    = df.iloc[-2]
+    gap_pct = latest["gap_pct"]
+    abs_gap = abs(gap_pct)
+
+    if abs_gap < 0.03:
+        return {"passed": False, "score": 0,
+                "detail": {"Gap >= 3% Required": False},
+                "pattern": "Gap & Go", "grade": "D"}
+
+    gap_up = gap_pct > 0
+
+    if gap_up:
+        close_pos = (latest["close"] - latest["low"]) / max(latest["high"] - latest["low"], 0.01)
+        checks = {
+            "Gap Up >= 3%":           bool(gap_pct >= 0.03),
+            "Gap Up >= 5% (Strong)":  bool(gap_pct >= 0.05),
+            "Continues Up (no fade)": bool(close_pos >= 0.5),
+            "Rel Vol >= 2x":          bool(latest["rel_vol"] >= 2.0),
+            "Above Prev Day High":    bool(latest["close"] > prev["high"]),
+            "RSI Momentum (50-85)":   bool(50 <= latest["rsi"] <= 85),
+        }
+    else:
+        close_pos = (latest["close"] - latest["low"]) / max(latest["high"] - latest["low"], 0.01)
+        checks = {
+            "Gap Down >= 3%":          bool(gap_pct <= -0.03),
+            "Gap Down >= 5% (Strong)": bool(gap_pct <= -0.05),
+            "Continues Down (no bounce)": bool(close_pos <= 0.5),
+            "Rel Vol >= 2x":           bool(latest["rel_vol"] >= 2.0),
+            "Below Prev Day Low":      bool(latest["close"] < prev["low"]),
+            "RSI Weak (15-50)":        bool(15 <= latest["rsi"] <= 50),
+        }
+
+    score     = sum(checks.values())
+    passed    = score >= 4
+    grade     = "A" if score >= 6 else "B" if score >= 5 else "C" if score >= 4 else "D"
+    direction = "GAP UP" if gap_up else "GAP DOWN"
+
+    return {
+        "passed":    passed,
+        "score":     score,
+        "total":     6,
+        "detail":    checks,
+        "grade":     grade,
+        "pattern":   "Gap & Go",
+        "direction": direction,
+        "gap_pct":   round(gap_pct * 100, 2),
+        "rel_vol":   round(latest["rel_vol"], 1),
+        "rsi":       round(latest["rsi"], 1),
+    }
+
+
+# ═══════════════════════════════════════════════════════════
+#  DAY TRADING STRATEGY 5: Intraday Momentum
+# ═══════════════════════════════════════════════════════════
+
+def intraday_momentum(df: pd.DataFrame) -> Dict:
+    """
+    Multi-factor intraday momentum score combining
+    volume, price action, trend and indicator alignment.
+    """
+    if len(df) < 22:
+        return {"passed": False, "score": 0, "detail": {}, "pattern": "Intraday Momentum"}
+
+    latest  = df.iloc[-1]
+    prev    = df.iloc[-2]
+    close   = latest["close"]
+    pct_chg = latest["pct_chg"]
+
+    # Candle body ratio: large body = conviction
+    candle_range = latest["high"] - latest["low"]
+    candle_body  = abs(latest["close"] - latest["open"])
+    body_ratio   = candle_body / candle_range if candle_range > 0 else 0
+
+    # Price vs yesterday
+    above_prev_close = close > prev["close"]
+
+    # Checks
+    checks = {
+        "Move > 2% Today":         bool(abs(pct_chg) >= 0.02),
+        "Rel Vol >= 2x":           bool(latest["rel_vol"] >= 2.0),
+        "Strong Candle (>50% body)": bool(body_ratio > 0.5),
+        "Trending (above MA20)":   bool(close > latest["ma20"]) if pct_chg > 0 else bool(close < latest["ma20"]),
+        "MACD Aligned":            bool(latest["macd"] > latest["macd_sig"]) if pct_chg > 0
+                                   else bool(latest["macd"] < latest["macd_sig"]),
+        "BB Expansion":            bool(latest["bb_width"] > df["bb_width"].iloc[-10:].mean() * 1.2),
+        "Above/Below Prev Close":  above_prev_close if pct_chg > 0 else not above_prev_close,
+    }
+
+    score     = sum(checks.values())
+    passed    = score >= 5
+    grade     = "A" if score >= 7 else "B" if score >= 5 else "C"
+    direction = "BULLISH" if pct_chg > 0 else "BEARISH"
+
+    return {
+        "passed":     passed,
+        "score":      score,
+        "total":      7,
+        "detail":     checks,
+        "grade":      grade,
+        "pattern":    "Intraday Momentum",
+        "direction":  direction,
+        "pct_chg":    round(pct_chg * 100, 2),
+        "body_ratio": round(body_ratio * 100, 1),
+        "rel_vol":    round(latest["rel_vol"], 1),
+        "rsi":        round(latest["rsi"], 1),
+    }
+
+
+# ═══════════════════════════════════════════════════════════
 #  MASTER RUNNER
 # ═══════════════════════════════════════════════════════════
 
-STRATEGY_MAP = {
+# Swing strategies
+SWING_STRATEGIES = {
     "Minervini SEPA":   minervini_sepa,
     "Bonde Momentum":   bonde_momentum,
     "Island Reversal":  bullish_island_reversal,
@@ -434,6 +744,17 @@ STRATEGY_MAP = {
     "Failed Breakdown": failed_breakdown,
     "Momentum Filter":  momentum_filter,
 }
+
+# Day trading strategies
+DAY_STRATEGIES = {
+    "VWAP Trend":         vwap_strategy,
+    "Opening Range (ORB)": opening_range_breakout,
+    "High Rel Volume":    high_relative_volume,
+    "Gap & Go":           premarket_gap_go,
+    "Intraday Momentum":  intraday_momentum,
+}
+
+STRATEGY_MAP = {**SWING_STRATEGIES, **DAY_STRATEGIES}
 
 
 def run_strategies(ticker: str, df_raw: pd.DataFrame, selected: list) -> Dict:
