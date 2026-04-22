@@ -1,6 +1,7 @@
 """
 app.py — Stock Strategy Scanner Dashboard
 Swing + Day Trading strategies, Options Activity, Alerts
+Email-based access control.
 """
 
 import streamlit as st
@@ -20,7 +21,7 @@ from universes     import get_universe
 from options_scanner import render_options_panel, scan_options_for_list
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  PAGE CONFIG
+#  PAGE CONFIG  (must be first Streamlit call)
 # ══════════════════════════════════════════════════════════════════════════════
 
 st.set_page_config(
@@ -29,6 +30,86 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  ACCESS CONTROL — Email whitelist + shared password
+# ══════════════════════════════════════════════════════════════════════════════
+
+_LOGIN_CSS = """
+<style>
+.login-box {
+    max-width: 420px;
+    margin: 8vh auto;
+    background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
+    border-radius: 16px;
+    padding: 2.5rem 2.8rem;
+    box-shadow: 0 8px 40px rgba(0,0,0,0.5);
+    color: white;
+}
+.login-box h2 { margin: 0 0 0.3rem; font-size: 1.6rem; }
+.login-box p  { margin: 0 0 1.8rem; opacity: 0.7; font-size: 0.9rem; }
+</style>
+"""
+
+def _login_page():
+    """Render the login screen and return True if authenticated."""
+    st.markdown(_LOGIN_CSS, unsafe_allow_html=True)
+    st.markdown("""
+    <div class="login-box">
+      <h2>📈 Stock Strategy Scanner</h2>
+      <p>Restricted access — approved users only</p>
+    </div>
+    """, unsafe_allow_html=True)
+
+    col = st.columns([1, 2, 1])[1]   # centre the form
+
+    with col:
+        with st.form("login_form", clear_on_submit=False):
+            st.markdown("### 🔐 Sign In")
+            email    = st.text_input("Email address", placeholder="you@gmail.com")
+            password = st.text_input("Password",      placeholder="••••••••", type="password")
+            submit   = st.form_submit_button("Sign In", use_container_width=True, type="primary")
+
+        if submit:
+            email = email.strip().lower()
+
+            # Load whitelist from secrets
+            allowed: dict = dict(st.secrets.get("allowed_emails", {}))
+            allowed_lower = {k.lower(): v for k, v in allowed.items()}
+            app_password  = st.secrets.get("APP_PASSWORD", "")
+
+            if email not in allowed_lower:
+                st.error("❌ This email is not authorised. Contact the admin to request access.")
+            elif password != app_password:
+                st.error("❌ Incorrect password.")
+            else:
+                st.session_state["authenticated"] = True
+                st.session_state["user_email"]    = email
+                st.session_state["user_name"]     = allowed_lower[email]
+                st.rerun()
+
+        st.caption("Contact admin to request access.")
+    return False
+
+
+def _check_auth() -> bool:
+    """Return True if the user is authenticated, else show login page and return False."""
+    if st.session_state.get("authenticated"):
+        return True
+    _login_page()
+    return False
+
+
+# ── Initialise session state ───────────────────────────────────────────────
+for _k, _v in [("authenticated", False), ("user_email", ""),
+               ("user_name", ""), ("scan_results", []),
+               ("scan_meta", {}), ("raw_data", {})]:
+    if _k not in st.session_state:
+        st.session_state[_k] = _v
+
+# ── Gate: stop here if not logged in ──────────────────────────────────────
+if not _check_auth():
+    st.stop()
 
 st.markdown("""
 <style>
@@ -81,13 +162,7 @@ def _send_email_alert(signals: list, smtp_user: str, smtp_pass: str, to_addr: st
         st.sidebar.error(f"Email error: {e}")
         return False
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  SESSION STATE
-# ══════════════════════════════════════════════════════════════════════════════
-
-for key, default in [("scan_results", []), ("scan_meta", {}), ("raw_data", {})]:
-    if key not in st.session_state:
-        st.session_state[key] = default
+# (session state already initialised in auth block above)
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  SIDEBAR
@@ -95,6 +170,18 @@ for key, default in [("scan_results", []), ("scan_meta", {}), ("raw_data", {})]:
 
 with st.sidebar:
     st.markdown("## 📈 Strategy Scanner")
+
+    # ── Logged-in user info + logout ──────────────────────────────────────────
+    user_name  = st.session_state.get("user_name", "User")
+    user_email = st.session_state.get("user_email", "")
+    st.success(f"👤 **{user_name}**\n\n{user_email}")
+    if st.button("🚪 Log Out", use_container_width=True):
+        for k in ["authenticated", "user_email", "user_name",
+                  "scan_results", "scan_meta", "raw_data"]:
+            st.session_state[k] = False if k == "authenticated" else "" if k in ["user_email","user_name"] else [] if k == "scan_results" else {}
+        st.rerun()
+
+    st.divider()
 
     # ── API Keys ──────────────────────────────────────────────────────────────
     st.markdown("### 🔑 Alpaca API Keys")
@@ -324,8 +411,9 @@ m6.metric("Scan Time",     meta.get("timestamp", "—"))
 st.markdown("---")
 
 # ── Tabs ───────────────────────────────────────────────────────────────────
-tab_all, tab_day, tab_opts, tab_chart, tab_detail, tab_guide = st.tabs([
+tab_all, tab_entry, tab_day, tab_opts, tab_chart, tab_detail, tab_guide = st.tabs([
     "📋 All Signals",
+    "📍 Entry & Exit",
     "⚡ Day Trading",
     "🎯 Options Activity",
     "📈 Chart",
@@ -343,31 +431,57 @@ with tab_all:
     else:
         rows = []
         for r in filtered:
+            direction  = r.get("Direction", "—")
+            dir_label  = "🟢 BULL" if direction == "BULL" else ("🔴 BEAR" if direction == "BEAR" else "—")
+            # Best trade (first in _trades list, highest conviction)
+            trades = r.get("_trades", [])
+            best   = trades[0] if trades else {}
             rows.append({
+                "Dir":       dir_label,
                 "Ticker":    r["Ticker"],
                 "Price":     r["Price"],
                 "Chg %":     r["Chg%"],
-                "Volume":    f"{r['Vol']:,}",
                 "Rel Vol":   r["RelVol"],
                 "RSI":       r["RSI"],
+                "Entry":     best.get("entry",    "—"),
+                "Stop":      best.get("stop_loss","—"),
+                "T1 (1.5R)": best.get("target_1", "—"),
+                "T2 (2.5R)": best.get("target_2", "—"),
+                "Risk %":    best.get("risk_%",   "—"),
                 "# Signals": r["# Signals"],
                 "Signals":   r["Signal List"],
             })
 
         df_disp = pd.DataFrame(rows).sort_values("# Signals", ascending=False)
 
+        def colour_dir(val):
+            if "BULL" in str(val): return "color: #16a34a; font-weight: bold"
+            if "BEAR" in str(val): return "color: #ef4444; font-weight: bold"
+            return ""
+
         def colour_chg(val):
             if isinstance(val, (int, float)):
                 return "color: #16a34a" if val > 0 else "color: #dc2626" if val < 0 else ""
             return ""
 
-        st.dataframe(
-            df_disp.style
-                .map(colour_chg, subset=["Chg %"])
-                .format({"Price": "${:.2f}", "Chg %": "{:+.2f}%",
-                         "Rel Vol": "{:.1f}x", "RSI": "{:.0f}"}),
-            use_container_width=True, height=480
-        )
+        # Format numeric columns only where they are numeric
+        num_cols = ["Price", "Chg %", "Rel Vol", "RSI", "Entry", "Stop",
+                    "T1 (1.5R)", "T2 (2.5R)", "Risk %"]
+        fmt = {}
+        for col in num_cols:
+            if col in df_disp.columns and pd.api.types.is_numeric_dtype(df_disp[col]):
+                if col == "Price":       fmt[col] = "${:.2f}"
+                elif col == "Chg %":     fmt[col] = "{:+.2f}%"
+                elif col == "Rel Vol":   fmt[col] = "{:.1f}x"
+                elif col == "RSI":       fmt[col] = "{:.0f}"
+                elif col == "Risk %":    fmt[col] = "{:.2f}%"
+                elif col in ("Entry","Stop","T1 (1.5R)","T2 (2.5R)"): fmt[col] = "${:.2f}"
+
+        styler = df_disp.style.map(colour_chg, subset=["Chg %"]).map(colour_dir, subset=["Dir"])
+        if fmt:
+            styler = styler.format(fmt, na_rep="—")
+
+        st.dataframe(styler, use_container_width=True, height=480)
 
         csv = io.StringIO()
         df_disp.to_csv(csv, index=False)
@@ -395,7 +509,148 @@ with tab_all:
             st.plotly_chart(fig, use_container_width=True)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TAB 2 — DAY TRADING SIGNALS
+#  TAB 2 — ENTRY & EXIT (Bull/Bear Direction + Trade Setup Cards)
+# ══════════════════════════════════════════════════════════════════════════════
+
+_ENTRY_CSS = """
+<style>
+.trade-card {
+    border-radius: 12px; padding: 1rem 1.2rem; margin-bottom: 0.8rem;
+    border-left: 5px solid #6366f1;
+}
+.bull-card  { border-left-color: #16a34a; background: rgba(22,163,74,0.07); }
+.bear-card  { border-left-color: #ef4444; background: rgba(239,68,68,0.07); }
+.card-title { font-size: 1rem; font-weight: 700; margin-bottom: 0.2rem; }
+.entry-note { font-size: 0.88rem; color: #86efac; margin-top: 0.3rem; }
+.exit-note  { font-size: 0.88rem; color: #fca5a5; margin-top: 0.2rem; }
+</style>
+"""
+
+with tab_entry:
+    st.markdown(_ENTRY_CSS, unsafe_allow_html=True)
+
+    if not filtered:
+        st.info("Run a scan first to see entry/exit setups.")
+    else:
+        has_trades = [r for r in filtered if r.get("_trades")]
+        if not has_trades:
+            st.warning("No trade setups available — ensure at least one strategy is enabled.")
+        else:
+            # Stock selector
+            tickers_with_trades = [r["Ticker"] for r in has_trades]
+            sel_ee = st.selectbox("Select stock to view trade setups",
+                                  tickers_with_trades, key="ee_sel")
+
+            sel_ee_row = next((r for r in has_trades if r["Ticker"] == sel_ee), None)
+
+            if sel_ee_row:
+                direction = sel_ee_row.get("Direction", "—")
+                dir_badge = (
+                    "🟢 **BULLISH**" if direction == "BULL" else
+                    "🔴 **BEARISH**"  if direction == "BEAR" else
+                    "⚪ **NEUTRAL**"
+                )
+                st.markdown(
+                    f"## {sel_ee}  &nbsp; ${sel_ee_row['Price']:.2f}"
+                    f"  &nbsp;|&nbsp; {sel_ee_row['Chg%']:+.2f}%"
+                    f"  &nbsp;|&nbsp; RSI {sel_ee_row['RSI']}"
+                    f"  &nbsp;|&nbsp; Dominant Direction: {dir_badge}",
+                    unsafe_allow_html=True
+                )
+                st.caption(f"Signals: {sel_ee_row['Signal List']}")
+                st.divider()
+
+                trades = sel_ee_row.get("_trades", [])
+                for t in trades:
+                    tdir   = t.get("direction", "BULL")
+                    card_cls = "bull-card" if tdir == "BULL" else "bear-card"
+                    dir_icon = "🟢" if tdir == "BULL" else "🔴"
+                    grade    = t.get("grade", "")
+                    ttype    = t.get("trade_type", "Swing")
+                    strat    = t.get("strategy", "")
+
+                    entry   = t.get("entry")
+                    stop    = t.get("stop_loss")
+                    t1      = t.get("target_1")
+                    t2      = t.get("target_2")
+                    t3      = t.get("target_3")
+                    risk_p  = t.get("risk_%")
+                    rr      = t.get("R:R", "1:2.5")
+
+                    entry_note = t.get("entry_note", "")
+                    exit_note  = t.get("exit_note", "")
+
+                    st.markdown(
+                        f'<div class="trade-card {card_cls}">'
+                        f'<div class="card-title">{dir_icon} {strat} &nbsp;'
+                        f'<span style="color:#a78bfa">[{grade}]</span>'
+                        f' &nbsp;·&nbsp; <span style="opacity:.7;font-size:.85rem">{ttype}</span></div>'
+                        f'<div class="entry-note">📌 {entry_note}</div>'
+                        f'<div class="exit-note">🚪 {exit_note}</div>'
+                        f'</div>',
+                        unsafe_allow_html=True
+                    )
+
+                    c1, c2, c3, c4, c5, c6 = st.columns(6)
+                    def _fmt_price(v):
+                        return f"${v:.2f}" if isinstance(v, (int, float)) else "—"
+                    c1.metric("Entry",      _fmt_price(entry))
+                    c2.metric("Stop Loss",  _fmt_price(stop),
+                              delta=f"-{risk_p:.2f}%" if isinstance(risk_p, (int,float)) else None,
+                              delta_color="inverse")
+                    c3.metric("T1 (1.5R)",  _fmt_price(t1))
+                    c4.metric("T2 (2.5R)",  _fmt_price(t2))
+                    c5.metric("T3 (4R)",    _fmt_price(t3))
+                    c6.metric("R:R",        rr)
+                    st.markdown("---")
+
+            # ── Summary table of all stocks ──────────────────────────────────────
+            st.markdown("### 📊 All Setups — Summary")
+            summary_rows = []
+            for r in has_trades:
+                for t in r.get("_trades", []):
+                    tdir = t.get("direction", "BULL")
+                    summary_rows.append({
+                        "Dir":      "🟢 BULL" if tdir == "BULL" else "🔴 BEAR",
+                        "Ticker":   r["Ticker"],
+                        "Strategy": t.get("strategy", ""),
+                        "Type":     t.get("trade_type", ""),
+                        "Grade":    t.get("grade", ""),
+                        "Entry":    t.get("entry"),
+                        "Stop":     t.get("stop_loss"),
+                        "T1":       t.get("target_1"),
+                        "T2":       t.get("target_2"),
+                        "Risk %":   t.get("risk_%"),
+                    })
+
+            if summary_rows:
+                df_sum = pd.DataFrame(summary_rows)
+                sum_fmt = {}
+                for col in ("Entry", "Stop", "T1", "T2"):
+                    if col in df_sum.columns and pd.api.types.is_numeric_dtype(df_sum[col]):
+                        sum_fmt[col] = "${:.2f}"
+                if "Risk %" in df_sum.columns and pd.api.types.is_numeric_dtype(df_sum["Risk %"]):
+                    sum_fmt["Risk %"] = "{:.2f}%"
+
+                def _dir_colour(v):
+                    if "BULL" in str(v): return "color: #16a34a; font-weight:bold"
+                    if "BEAR" in str(v): return "color: #ef4444; font-weight:bold"
+                    return ""
+
+                styler_sum = df_sum.style.map(_dir_colour, subset=["Dir"])
+                if sum_fmt:
+                    styler_sum = styler_sum.format(sum_fmt, na_rep="—")
+                st.dataframe(styler_sum, use_container_width=True, height=380)
+
+                csv2 = io.StringIO()
+                df_sum.to_csv(csv2, index=False)
+                st.download_button("⬇️ Download Setups CSV", csv2.getvalue(),
+                                   file_name=f"setups_{datetime.now().strftime('%Y%m%d_%H%M')}.csv",
+                                   mime="text/csv")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 3 — DAY TRADING SIGNALS
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_day:
