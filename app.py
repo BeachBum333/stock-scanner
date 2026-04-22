@@ -1,7 +1,6 @@
 """
 app.py — Stock Strategy Scanner Dashboard
 Swing + Day Trading strategies, Options Activity, Alerts
-Email-based access control.
 """
 
 import streamlit as st
@@ -31,85 +30,10 @@ st.set_page_config(
     initial_sidebar_state="expanded",
 )
 
-# ══════════════════════════════════════════════════════════════════════════════
-#  ACCESS CONTROL — Email whitelist + shared password
-# ══════════════════════════════════════════════════════════════════════════════
-
-_LOGIN_CSS = """
-<style>
-.login-box {
-    max-width: 420px;
-    margin: 8vh auto;
-    background: linear-gradient(135deg, #0f0c29, #302b63, #24243e);
-    border-radius: 16px;
-    padding: 2.5rem 2.8rem;
-    box-shadow: 0 8px 40px rgba(0,0,0,0.5);
-    color: white;
-}
-.login-box h2 { margin: 0 0 0.3rem; font-size: 1.6rem; }
-.login-box p  { margin: 0 0 1.8rem; opacity: 0.7; font-size: 0.9rem; }
-</style>
-"""
-
-def _login_page():
-    """Render the login screen and return True if authenticated."""
-    st.markdown(_LOGIN_CSS, unsafe_allow_html=True)
-    st.markdown("""
-    <div class="login-box">
-      <h2>📈 Stock Strategy Scanner</h2>
-      <p>Restricted access — approved users only</p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    col = st.columns([1, 2, 1])[1]   # centre the form
-
-    with col:
-        with st.form("login_form", clear_on_submit=False):
-            st.markdown("### 🔐 Sign In")
-            email    = st.text_input("Email address", placeholder="you@gmail.com")
-            password = st.text_input("Password",      placeholder="••••••••", type="password")
-            submit   = st.form_submit_button("Sign In", use_container_width=True, type="primary")
-
-        if submit:
-            email = email.strip().lower()
-
-            # Load whitelist from secrets
-            allowed: dict = dict(st.secrets.get("allowed_emails", {}))
-            allowed_lower = {k.lower(): v for k, v in allowed.items()}
-            app_password  = st.secrets.get("APP_PASSWORD", "")
-
-            if email not in allowed_lower:
-                st.error("❌ This email is not authorised. Contact the admin to request access.")
-            elif password != app_password:
-                st.error("❌ Incorrect password.")
-            else:
-                st.session_state["authenticated"] = True
-                st.session_state["user_email"]    = email
-                st.session_state["user_name"]     = allowed_lower[email]
-                st.rerun()
-
-        st.caption("Contact admin to request access.")
-    return False
-
-
-def _check_auth() -> bool:
-    """Return True if the user is authenticated, else show login page and return False."""
-    if st.session_state.get("authenticated"):
-        return True
-    _login_page()
-    return False
-
-
 # ── Initialise session state ───────────────────────────────────────────────
-for _k, _v in [("authenticated", False), ("user_email", ""),
-               ("user_name", ""), ("scan_results", []),
-               ("scan_meta", {}), ("raw_data", {})]:
+for _k, _v in [("scan_results", []), ("scan_meta", {}), ("raw_data", {})]:
     if _k not in st.session_state:
         st.session_state[_k] = _v
-
-# ── Gate: stop here if not logged in ──────────────────────────────────────
-if not _check_auth():
-    st.stop()
 
 st.markdown("""
 <style>
@@ -162,26 +86,12 @@ def _send_email_alert(signals: list, smtp_user: str, smtp_pass: str, to_addr: st
         st.sidebar.error(f"Email error: {e}")
         return False
 
-# (session state already initialised in auth block above)
-
 # ══════════════════════════════════════════════════════════════════════════════
 #  SIDEBAR
 # ══════════════════════════════════════════════════════════════════════════════
 
 with st.sidebar:
     st.markdown("## 📈 Strategy Scanner")
-
-    # ── Logged-in user info + logout ──────────────────────────────────────────
-    user_name  = st.session_state.get("user_name", "User")
-    user_email = st.session_state.get("user_email", "")
-    st.success(f"👤 **{user_name}**\n\n{user_email}")
-    if st.button("🚪 Log Out", use_container_width=True):
-        for k in ["authenticated", "user_email", "user_name",
-                  "scan_results", "scan_meta", "raw_data"]:
-            st.session_state[k] = False if k == "authenticated" else "" if k in ["user_email","user_name"] else [] if k == "scan_results" else {}
-        st.rerun()
-
-    st.divider()
 
     # ── API Keys ──────────────────────────────────────────────────────────────
     st.markdown("### 🔑 Alpaca API Keys")
