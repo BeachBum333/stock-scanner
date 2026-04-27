@@ -18,6 +18,13 @@ from strategies import (run_strategies, STRATEGY_MAP,
 from data_fetcher  import fetch_stock_data, market_is_open
 from universes     import get_universe
 from options_scanner import render_options_panel, scan_options_for_list
+from gamma_wall    import render_gamma_wall
+
+try:
+    from streamlit_autorefresh import st_autorefresh
+    _HAS_AUTOREFRESH = True
+except ImportError:
+    _HAS_AUTOREFRESH = False
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  PAGE CONFIG  (must be first Streamlit call)
@@ -172,6 +179,26 @@ with st.sidebar:
 
     st.divider()
 
+    # ── Live Refresh ──────────────────────────────────────────────────────────
+    st.markdown("### 🔄 Live Refresh")
+    live_refresh = st.toggle("Auto-refresh data", value=False,
+                             help="Automatically re-fetches and re-scans at the chosen interval")
+    refresh_interval = 60
+    if live_refresh:
+        refresh_interval = st.select_slider(
+            "Interval",
+            options=[30, 60, 120, 300],
+            value=60,
+            format_func=lambda s: f"{s}s" if s < 60 else f"{s//60}m",
+        )
+        if _HAS_AUTOREFRESH:
+            st_autorefresh(interval=refresh_interval * 1000, key="live_autorefresh")
+            st.caption(f"⏱ Refreshing every {refresh_interval}s")
+        else:
+            st.warning("Install `streamlit-autorefresh` to enable live refresh.")
+
+    st.divider()
+
     scan_clicked = st.button("🚀 Run Scan", type="primary", use_container_width=True)
     st.caption("Data: Alpaca / Yahoo Finance  |  ⚠️ Not financial advice")
 
@@ -321,11 +348,12 @@ m6.metric("Scan Time",     meta.get("timestamp", "—"))
 st.markdown("---")
 
 # ── Tabs ───────────────────────────────────────────────────────────────────
-tab_all, tab_entry, tab_day, tab_opts, tab_chart, tab_detail, tab_guide = st.tabs([
+tab_all, tab_entry, tab_day, tab_opts, tab_gamma, tab_chart, tab_detail, tab_guide = st.tabs([
     "📋 All Signals",
     "📍 Entry & Exit",
     "⚡ Day Trading",
     "🎯 Options Activity",
+    "🧲 Gamma Wall",
     "📈 Chart",
     "🔍 Strategy Detail",
     "📚 Guide",
@@ -664,7 +692,61 @@ with tab_opts:
                     render_options_panel(sel2)
 
 # ══════════════════════════════════════════════════════════════════════════════
-#  TAB 4 — CHART
+#  TAB 5 — GAMMA WALL
+# ══════════════════════════════════════════════════════════════════════════════
+
+with tab_gamma:
+    st.markdown("### 🧲 Gamma Wall & GEX Analysis")
+    st.caption(
+        "Gamma Exposure (GEX) shows where market-maker hedging pressure creates "
+        "price walls, support zones, and volatility regime shifts. "
+        "**Gamma Wall** = price magnet. **Gamma Flip** = low-vol / high-vol dividing line."
+    )
+
+    gex_col1, gex_col2 = st.columns([2, 1])
+    with gex_col1:
+        all_tickers_gex = [r["Ticker"] for r in filtered] if filtered else []
+        manual_gex      = st.text_input("Or type any ticker", placeholder="AAPL", key="gex_manual")
+        choices_gex     = ([manual_gex.upper()] if manual_gex.strip() else []) + all_tickers_gex
+        choices_gex     = list(dict.fromkeys(choices_gex))
+        sel_gex         = st.selectbox("Select ticker", choices_gex if choices_gex else ["—"], key="gex_sel")
+
+    with gex_col2:
+        st.markdown("<br>", unsafe_allow_html=True)
+        load_gex = st.button("📊 Load Gamma Wall", type="primary", key="gex_load")
+
+    if load_gex and sel_gex and sel_gex != "—":
+        render_gamma_wall(sel_gex)
+    elif not load_gex:
+        st.info("Select a ticker and click **Load Gamma Wall** to see GEX analysis.")
+
+    # ── Quick Explainer ───────────────────────────────────────────────────────
+    with st.expander("📚 What is Gamma Exposure? (click to expand)"):
+        st.markdown("""
+**Gamma** measures how much an option's delta changes as the stock price moves.
+Market makers who sell options must delta-hedge continuously — and their hedging
+*creates* price forces at key strikes.
+
+| GEX Concept | What It Means for Price |
+|---|---|
+| **Positive Net GEX** | Market makers buy dips & sell rallies → price mean-reverts, low volatility |
+| **Negative Net GEX** | Market makers chase price moves → volatility expands, trends accelerate |
+| **Gamma Wall** | Highest positive GEX strike — strong resistance / price magnet |
+| **Put Wall** | Highest negative GEX strike — support floor or, if broken, fast drop |
+| **Gamma Flip** | Where cumulative GEX crosses zero — the vol regime dividing line |
+
+**Trading with GEX:**
+- *Above gamma flip + below gamma wall* → range trade, sell calls/puts
+- *Below gamma flip* → expect big moves, trade breakouts with momentum
+- *Near gamma wall* → fade the move (likely to reverse or pin)
+- *Near put wall* → high conviction bounce level, or beware fast break
+
+> GEX is most useful on large-cap, highly optioned stocks (AAPL, SPY, TSLA, NVDA, QQQ).
+""")
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  TAB 6 — CHART
 # ══════════════════════════════════════════════════════════════════════════════
 
 with tab_chart:

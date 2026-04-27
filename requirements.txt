@@ -6,3 +6,6 @@ yfinance>=0.2.36
 alpaca-py>=0.20.0
 lxml>=5.0.0
 html5lib>=1.1
+requests>=2.31.0
+scipy>=1.11.0
+streamlit-autorefresh>=0.1.0
